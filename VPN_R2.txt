@@ -1,0 +1,35 @@
+conf t
+! ISAKMP
+crypto isakmp policy 10
+ encr aes 256
+ hash sha
+ authentication pre-share
+ group 2
+ lifetime 86400
+exit
+
+crypto isakmp key vpnkey123 address 10.10.10.1
+
+! Transform-set
+crypto ipsec transform-set MY-TRANSFORM esp-aes esp-sha-hmac
+ mode tunnel
+
+! ACL VPN
+access-list 100 permit ip 192.168.15.0 0.0.0.255 192.168.10.0 0.0.0.255
+access-list 100 permit ip 192.168.15.0 0.0.0.255 192.168.20.0 0.0.0.255
+access-list 100 permit ip 192.168.15.0 0.0.0.255 192.168.30.0 0.0.0.255
+
+! Crypto map
+crypto map VPN-MAP 10 ipsec-isakmp
+ set peer 10.10.10.1
+ set transform-set MY-TRANSFORM
+ match address 100
+exit
+
+interface s1/0
+ crypto map VPN-MAP
+
+! Routage statique vers les 3 zones
+ip route 192.168.10.0 255.255.255.0 10.10.10.1
+ip route 192.168.20.0 255.255.255.0 10.10.10.1
+ip route 192.168.30.0 255.255.255.0 10.10.10.1

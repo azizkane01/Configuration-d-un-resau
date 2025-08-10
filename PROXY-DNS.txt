@@ -1,0 +1,52 @@
+#!/bin/bash
+set -e
+
+echo "🔧 Installation de dnsmasq..."
+apt update
+apt install -y dnsmasq
+
+echo "🗂️ Sauvegarde de la configuration existante..."
+cp /etc/dnsmasq.conf /etc/dnsmasq.conf.bak
+
+echo "✏️ Écriture de la nouvelle configuration..."
+tee /etc/dnsmasq.conf > /dev/null << 'EOF'
+##############################################
+# dnsmasq.conf – Proxy DNS (192.168.100.20) #
+##############################################
+
+# Interface réseau utilisée dans la DMZ
+interface=eth0
+listen-address=127.0.0.1,192.168.100.20
+
+# Taille du cache DNS
+cache-size=1000
+
+# Ne pas utiliser /etc/resolv.conf
+no-resolv
+
+# Serveurs DNS internes (primaire + secondaire)
+server=/tp.local/192.168.200.30
+server=/tp.local/192.168.100.30
+
+server=/smarttech.local/192.168.200.30
+server=/smarttech.local/192.168.100.30
+
+server=/local/192.168.200.30
+server=/local/192.168.100.30
+
+# Serveurs DNS publics (pour les domaines externes)
+server=8.8.8.8
+server=1.1.1.1
+
+# Empêche l'écoute sur d'autres interfaces réseau
+bind-interfaces
+
+# Log des requêtes DNS (pour débogage)
+log-queries
+log-facility=/var/log/dnsmasq.log
+EOF
+
+echo "🚀 Redémarrage du service dnsmasq..."
+ service  dnsmasq restart
+
+echo "✅ Installation et configuration terminées."

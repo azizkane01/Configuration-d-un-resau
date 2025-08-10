@@ -1,0 +1,501 @@
+#!/bin/bash
+# Script d'installation et configuration Asterisk pour FreeIPA LDAP
+
+# Variables de configuration
+FREEIPA_SERVER="192.168.200.50"
+LDAP_BASE_DN="dc=tp,dc=local"
+ASTERISK_BIND_DN="cn=Directory Manager"
+
+echo "======================================"
+echo "Installation et configuration Asterisk"
+echo "======================================"
+
+echo "[+] Installation d'Asterisk sur Debian/Ubuntu..."
+
+# Vérifier si on est root
+if [ "$EUID" -ne 0 ]; then 
+    echo "[-] Ce script doit être exécuté en tant que root"
+    exit 1
+fi
+
+# Détecter la version de Debian
+DEBIAN_VERSION=$(cat /etc/debian_version | cut -d. -f1)
+echo "[+] Version Debian détectée: $DEBIAN_VERSION"
+
+# Mise à jour des paquets
+echo "[+] Mise à jour de la liste des paquets..."
+apt update
+
+# Ajouter les dépôts nécessaires pour Asterisk sur Debian 12+
+if [ "$DEBIAN_VERSION" -ge "12" ]; then
+    echo "[+] Ajout du dépôt non-free pour Asterisk..."
+    # Vérifier si non-free est déjà dans sources.list
+    if ! grep -q "non-free" /etc/apt/sources.list; then
+        sed -i 's/main$/main contrib non-free non-free-firmware/' /etc/apt/sources.list
+        apt update
+    fi
+fi
+
+# Installation des paquets Asterisk disponibles
+echo "[+] Installation d'Asterisk et des modules..."
+
+# Essayer d'abord les paquets Asterisk standards
+if apt-cache show asterisk &>/dev/null; then
+    apt install -y asterisk asterisk-modules asterisk-dev asterisk-doc
+else
+    # Installation depuis les sources ou dépôt alternatif
+    echo "[+] Installation depuis les dépôts alternatifs..."
+    
+    # Ajouter le dépôt Asterisk officiel
+    wget -O - https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-key.gpg | apt-key add - 2>/dev/null || true
+    echo "deb https://downloads.asterisk.org/pub/telephony/asterisk bookworm main" > /etc/apt/sources.list.d/asterisk.list 2>/dev/null || true
+    
+    # Ou installer depuis les sources
+    echo "[+] Installation des dépendances pour compilation..."
+    apt install -y build-essential wget libssl-dev libncurses5-dev libedit-dev libxml2-dev uuid-dev libsqlite3-dev pkg-config
+    
+    # Télécharger et compiler Asterisk
+    cd /tmp
+    ASTERISK_VERSION="20.10.0"
+    wget -q https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${ASTERISK_VERSION}.tar.gz
+    
+    if [ -f "asterisk-${ASTERISK_VERSION}.tar.gz" ]; then
+        echo "[+] Compilation d'Asterisk ${ASTERISK_VERSION}..."
+        tar xzf asterisk-${ASTERISK_VERSION}.tar.gz
+        cd asterisk-${ASTERISK_VERSION}
+        
+        # Configuration avec support LDAP
+        ./configure --with-ldap
+        
+        # Installation des dépendances manquantes
+        contrib/scripts/install_prereq install
+        
+        # Compilation
+        make menuselect.makeopts
+        # Activer les modules LDAP
+        menuselect/menuselect --enable res_config_ldap menuselect.makeopts
+        menuselect/menuselect --enable res_ldap menuselect.makeopts
+        
+        make -j$(nproc)
+        make install
+        make samples
+        make config
+        
+        echo "[✓] Asterisk compilé et installé depuis les sources"
+    else
+        echo "[-] Impossible de télécharger Asterisk, essai d'installation minimale..."
+        # Installation de paquets alternatifs si disponibles
+        apt install -y asterisk-core-sounds-en-gsm asterisk-core-sounds-en-wav || true
+    fi
+fi
+
+# Installation des dépendances LDAP
+echo "[+] Installation des outils LDAP..."
+apt install -y ldap-utils libldap2-dev
+
+# Installation des sons (noms corrects pour Debian 12)
+echo "[+] Installation des codecs et sons..."
+apt install -y asterisk-core-sounds-en-gsm asterisk-core-sounds-en-wav asterisk-moh-opsound-gsm asterisk-moh-opsound-wav 2>/dev/null || echo "[!] Certains paquets de sons non disponibles"
+
+# Installation d'outils utiles pour le dépannage
+echo "[+] Installation d'outils de diagnostic..."
+apt install -y tcpdump htop nano net-tools
+
+# Installation du support pour les codecs propriétaires (optionnel)
+echo "[+] Installation du support pour codecs supplémentaires..."
+apt install -y asterisk-g729 2>/dev/null || echo "[!] Codec G.729 non disponible (normal)"
+
+# Configurer le firewall UFW si présent
+if command -v ufw &> /dev/null; then
+    echo "[+] Configuration du firewall UFW..."
+    ufw allow 5060/udp comment "Asterisk SIP"
+    ufw allow 5060/tcp comment "Asterisk SIP"
+    ufw allow 10000:20000/udp comment "Asterisk RTP"
+    echo "[✓] Règles firewall ajoutées"
+fi
+
+# Vérifier l'installation
+if command -v asterisk &> /dev/null; then
+    echo "[✓] Asterisk installé avec succès - Version: $(asterisk -V 2>/dev/null || echo 'Version inconnue')"
+elif [ -f /usr/sbin/asterisk ]; then
+    echo "[✓] Asterisk installé dans /usr/sbin/"
+    ln -sf /usr/sbin/asterisk /usr/local/bin/asterisk 2>/dev/null || true
+elif [ -f /usr/local/sbin/asterisk ]; then
+    echo "[✓] Asterisk installé dans /usr/local/sbin/"
+    ln -sf /usr/local/sbin/asterisk /usr/local/bin/asterisk 2>/dev/null || true
+else
+    echo "[-] Erreur: Asterisk n'a pas pu être installé"
+    echo "[!] Essayons une installation manuelle simplifiée..."
+    
+    # Installation manuelle alternative
+    cd /tmp
+    echo "[+] Tentative d'installation depuis Debian Sid..."
+    wget -q http://ftp.debian.org/debian/pool/main/a/asterisk/asterisk_20.4.0~dfsg+~cs6.10.40431411-2_amd64.deb 2>/dev/null || true
+    
+    if [ -f "asterisk_20.4.0~dfsg+~cs6.10.40431411-2_amd64.deb" ]; then
+        echo "[+] Installation du paquet .deb téléchargé..."
+        dpkg -i asterisk_20.4.0~dfsg+~cs6.10.40431411-2_amd64.deb 2>/dev/null || true
+        apt-get install -f -y  # Corriger les dépendances
+    fi
+    
+    # Dernière vérification
+    if ! command -v asterisk &> /dev/null && ! [ -f /usr/sbin/asterisk ] && ! [ -f /usr/local/sbin/asterisk ]; then
+        echo "[-] Installation d'Asterisk échouée. Veuillez installer manuellement:"
+        echo "    1. Compiler depuis les sources : https://www.asterisk.org/downloads/"
+        echo "    2. Ou utiliser un dépôt tiers"
+        echo "    3. Ou installer depuis Debian Sid/Testing"
+        exit 1
+    fi
+fi
+
+# Arrêter Asterisk s'il est en cours d'exécution
+echo "[+] Arrêt d'Asterisk..."
+systemctl stop asterisk 2>/dev/null || true
+
+# Sauvegarder la configuration existante
+echo "[+] Sauvegarde de la configuration existante..."
+if [ -d /etc/asterisk ]; then
+    cp -r /etc/asterisk /etc/asterisk.backup.$(date +%Y%m%d_%H%M%S)
+    echo "[✓] Configuration sauvegardée"
+fi
+
+# Créer les répertoires nécessaires
+echo "[+] Création des répertoires..."
+mkdir -p /var/lib/asterisk/sounds/custom
+mkdir -p /var/log/asterisk
+mkdir -p /var/spool/asterisk/voicemail
+mkdir -p /var/run/asterisk
+
+# Créer l'utilisateur asterisk s'il n'existe pas
+if ! id "asterisk" &>/dev/null; then
+    echo "[+] Création de l'utilisateur asterisk..."
+    useradd -r -d /var/lib/asterisk -s /bin/false asterisk
+fi
+
+# Définir les permissions
+echo "[+] Configuration des permissions..."
+chown -R asterisk:asterisk /var/lib/asterisk
+chown -R asterisk:asterisk /var/log/asterisk
+chown -R asterisk:asterisk /var/spool/asterisk
+chown -R asterisk:asterisk /var/run/asterisk
+chown -R asterisk:asterisk /etc/asterisk
+
+# Configurer les permissions des fichiers de configuration
+chmod 640 /etc/asterisk/*.conf 2>/dev/null || true
+chmod 750 /etc/asterisk
+
+echo "[+] Configuration d'Asterisk pour FreeIPA LDAP..."
+
+# 1. Configuration de res_ldap.conf
+echo "[+] Configuration de res_ldap.conf..."
+cat > /etc/asterisk/res_ldap.conf <<EOF
+[_general]
+url = ldap://${FREEIPA_SERVER}:389
+basedn = ${LDAP_BASE_DN}
+user = ${ASTERISK_BIND_DN}
+pass = VotreMotDePasseLDAP
+version = 3
+; Options de connexion
+timelimit = 30
+sizelimit = 100
+
+[sipusers]
+; Configuration pour récupérer les utilisateurs SIP depuis FreeIPA
+url = ldap://${FREEIPA_SERVER}:389
+basedn = cn=users,cn=accounts,${LDAP_BASE_DN}
+; Filtre pour ne récupérer que les utilisateurs avec extension Asterisk
+filter = (&(objectClass=AsteriskAccount)(asteriskExtension=*))
+
+; Mapping des attributs FreeIPA vers Asterisk
+; Nom d'utilisateur SIP = extension
+name = asteriskExtension
+; Mot de passe SIP
+secret = asteriskPassword
+; Configuration SIP par défaut
+host = dynamic
+type = friend
+context = internal
+dtmfmode = rfc2833
+nat = force_rport,comedia
+qualify = yes
+canreinvite = no
+; Caller ID depuis le nom complet FreeIPA
+callerid = cn
+; Boîte vocale = extension
+mailbox = asteriskExtension
+EOF
+
+# 2. Configuration de sip.conf
+echo "[+] Configuration de sip.conf..."
+cat > /etc/asterisk/sip.conf <<EOF
+[general]
+; Configuration générale SIP
+context = unauthenticated
+bindport = 5060
+bindaddr = 0.0.0.0
+srvlookup = yes
+allowguest = no
+alwaysauthreject = yes
+
+; Codecs autorisés
+disallow = all
+allow = ulaw
+allow = alaw
+allow = gsm
+allow = g729
+
+; Configuration pour la récupération temps réel depuis LDAP
+rtcachefriends = yes
+rtupdate = yes
+rtautoclear = 120
+rtsavesysname = yes
+
+; Sécurité
+allowoverlap = no
+matchexterniplocally = yes
+
+; NAT et firewall
+nat = force_rport,comedia
+externip = VOTRE_IP_PUBLIQUE
+localnet = 192.168.200.0/24
+
+; Template par défaut pour les utilisateurs LDAP
+[ldap-template](!)
+type = friend
+host = dynamic
+context = internal
+dtmfmode = rfc2833
+nat = force_rport,comedia
+qualify = yes
+canreinvite = no
+insecure = no
+directmedia = no
+EOF
+
+# 3. Configuration de extconfig.conf pour activer LDAP
+echo "[+] Configuration de extconfig.conf..."
+cat > /etc/asterisk/extconfig.conf <<EOF
+[settings]
+; Configuration pour utiliser LDAP comme source de données
+sipusers => ldap,"sipusers"
+sippeers => ldap,"sipusers"
+EOF
+
+# 4. Configuration du dialplan (extensions.conf)
+echo "[+] Configuration du dialplan (extensions.conf)..."
+cat > /etc/asterisk/extensions.conf <<EOF
+[general]
+static = yes
+writeprotect = no
+clearglobalvars = no
+
+[globals]
+; Variables globales
+
+[internal]
+; Contexte pour les appels internes entre extensions
+; Appel direct vers une extension (1001, 1002, etc.)
+exten => _1XXX,1,NoOp(Appel vers l'extension \${EXTEN})
+exten => _1XXX,n,Dial(SIP/\${EXTEN},30,tT)
+exten => _1XXX,n,GotoIf(\$[\${DIALSTATUS} = BUSY]?busy:unavail)
+exten => _1XXX,n(unavail),VoiceMail(\${EXTEN}@default,u)
+exten => _1XXX,n,Hangup()
+exten => _1XXX,n(busy),VoiceMail(\${EXTEN}@default,b)
+exten => _1XXX,n,Hangup()
+
+; Accès à la messagerie vocale
+exten => *97,1,NoOp(Accès messagerie vocale)
+exten => *97,n,VoiceMailMain(\${CALLERID(num)}@default)
+exten => *97,n,Hangup()
+
+; Test de connectivité
+exten => 999,1,Answer()
+exten => 999,n,Playback(demo-congrats)
+exten => 999,n,Hangup()
+
+[unauthenticated]
+; Contexte pour les connexions non authentifiées
+; Rejeter tous les appels non authentifiés
+exten => _X.,1,NoOp(Appel non authentifié refusé)
+exten => _X.,n,Congestion()
+exten => _X.,n,Hangup()
+
+[default]
+; Contexte par défaut - redirection vers internal pour les utilisateurs authentifiés
+include => internal
+EOF
+
+# 5. Configuration de modules.conf
+echo "[+] Configuration des modules..."
+# Sauvegarder le fichier existant
+cp /etc/asterisk/modules.conf /etc/asterisk/modules.conf.bak 2>/dev/null || true
+
+# Créer une configuration modules.conf complète
+cat > /etc/asterisk/modules.conf <<EOF
+[modules]
+autoload=yes
+
+; Modules de base requis
+load => res_musiconhold.so
+load => app_dial.so
+load => app_playback.so
+load => app_voicemail.so
+load => chan_sip.so
+
+; Modules LDAP requis
+load => res_ldap.so
+load => res_config_ldap.so
+
+; Modules de codecs
+load => codec_ulaw.so
+load => codec_alaw.so
+load => codec_gsm.so
+
+; Modules d'applications utiles
+load => app_echo.so
+load => app_milliwatt.so
+load => app_congestion.so
+load => app_hangup.so
+load => app_answer.so
+
+; Modules de fonctions
+load => func_callerid.so
+load => func_logic.so
+load => func_strings.so
+
+; Ne pas charger les modules suivants si présents
+noload => chan_alsa.so
+noload => chan_oss.so
+noload => chan_console.so
+EOF
+
+# 6. Configuration de voicemail.conf
+echo "[+] Configuration de la messagerie vocale..."
+cat > /etc/asterisk/voicemail.conf <<EOF
+[general]
+format = wav49|gsm|wav
+serveremail = asterisk@tp.local
+attach = yes
+skipms = 3000
+maxsilence = 10
+silencethreshold = 128
+maxlogins = 3
+
+[default]
+; Les boîtes vocales seront créées automatiquement
+; basées sur les extensions LDAP
+EOF
+
+# 7. Configuration de logger.conf pour les logs
+echo "[+] Configuration des logs..."
+cat > /etc/asterisk/logger.conf <<EOF
+[general]
+dateformat=%F %T
+
+[logfiles]
+console => notice,warning,error,debug,verbose
+messages => notice,warning,error
+full => notice,warning,error,debug,verbose,dtmf,fax
+debug => debug
+verbose => verbose
+EOF
+
+# 8. Script de test de connectivité LDAP
+echo "[+] Création du script de test LDAP..."
+cat > /tmp/test_ldap.sh <<EOF
+#!/bin/bash
+echo "Test de connectivité LDAP vers FreeIPA..."
+ldapsearch -x -H ldap://${FREEIPA_SERVER}:389 \\
+  -D "${ASTERISK_BIND_DN}" \\
+  -w "VotreMotDePasseLDAP" \\
+  -b "cn=users,cn=accounts,${LDAP_BASE_DN}" \\
+  "(&(objectClass=AsteriskAccount)(asteriskExtension=*))" \\
+  uid cn asteriskExtension asteriskPassword
+
+echo ""
+echo "Vérification des utilisateurs Asterisk dans LDAP..."
+ldapsearch -x -H ldap://${FREEIPA_SERVER}:389 \\
+  -D "${ASTERISK_BIND_DN}" \\
+  -w "VotreMotDePasseLDAP" \\
+  -b "cn=users,cn=accounts,${LDAP_BASE_DN}" \\
+  "(asteriskExtension=*)" dn asteriskExtension
+EOF
+
+chmod +x /tmp/test_ldap.sh
+
+# Vérifier la configuration
+echo "[+] Vérification de la configuration..."
+
+# Test de syntaxe de la configuration
+if asterisk -T -C /etc/asterisk/asterisk.conf 2>/dev/null; then
+    echo "[✓] Configuration Asterisk valide"
+else
+    echo "[!] Attention: Problèmes potentiels dans la configuration"
+fi
+
+# Activer et démarrer le service
+echo "[+] Activation du service Asterisk..."
+systemctl enable asterisk
+systemctl start asterisk
+
+# Attendre que le service démarre
+sleep 5
+
+# Vérifier le statut
+if systemctl is-active --quiet asterisk; then
+    echo "[✓] Asterisk démarré avec succès"
+else
+    echo "[-] Problème de démarrage d'Asterisk"
+    echo "Consultez les logs: journalctl -u asterisk -f"
+fi
+
+echo ""
+echo "============================================="
+echo "Installation et configuration terminées !"
+echo "============================================="
+echo ""
+echo "📋 ÉTAPES DE FINALISATION :"
+echo ""
+echo "1️⃣  Configurez le mot de passe LDAP :"
+echo "   nano /etc/asterisk/res_ldap.conf"
+echo "   (Remplacez 'VotreMotDePasseLDAP' par le vrai mot de passe)"
+echo ""
+echo "2️⃣  Vérifiez/ajustez l'IP réseau si nécessaire :"
+echo "   nano /etc/asterisk/sip.conf"
+echo "   (Vérifiez les lignes 'externip' et 'localnet')"
+echo ""
+echo "3️⃣  Testez la connectivité LDAP :"
+echo "   /tmp/test_ldap.sh"
+echo ""
+echo "4️⃣  Redémarrez Asterisk après les modifications :"
+echo "   systemctl restart asterisk"
+echo ""
+echo "5️⃣  Vérifiez que les utilisateurs LDAP sont détectés :"
+echo "   asterisk -rx 'sip show peers'"
+echo ""
+echo "🔍 VÉRIFICATION ET DÉPANNAGE :"
+echo "   • Logs en temps réel : tail -f /var/log/asterisk/full"
+echo "   • CLI interactive : asterisk -rvvv"
+echo "   • Statut du service : systemctl status asterisk"
+echo "   • Test réseau : netstat -tulpn | grep asterisk"
+echo ""
+echo "📱 CONFIGURATION SOFTPHONE :"
+echo "   • Serveur SIP : $(hostname -I | awk '{print $1}' | head -1)"
+echo "   • Port SIP : 5060"
+echo "   • Utilisateur 1 : 1001 / sipPass123"
+echo "   • Utilisateur 2 : 1002 / sipPass456"
+echo "   • Extension de test : 999 (test audio)"
+echo "   • Messagerie vocale : *97"
+echo ""
+echo "🚀 TESTS À EFFECTUER :"
+echo "   1. Connecter un softphone avec l'extension 1001"
+echo "   2. Connecter un second softphone avec l'extension 1002"
+echo "   3. Tester un appel entre les deux extensions"
+echo "   4. Composer le 999 pour le test audio"
+echo "   5. Tester la messagerie vocale avec *97"
+echo ""
+echo "💡 SOFTPHONES RECOMMANDÉS :"
+echo "   • Linphone (multiplateforme)"
+echo "   • Zoiper (Windows/Mac/Mobile)"
+echo "   • X-Lite (Windows/Mac)"
+echo "   • CSipSimple (Android)"

@@ -1,0 +1,38 @@
+conf t
+! ISAKMP
+crypto isakmp policy 10
+ encr aes 256
+ hash sha
+ authentication pre-share
+ group 2
+ lifetime 86400
+exit
+
+crypto isakmp key vpnkey123 address 10.10.10.2
+
+! Transform-set
+crypto ipsec transform-set MY-TRANSFORM esp-aes esp-sha-hmac
+ mode tunnel
+
+access-list 100 permit ip 192.168.10.0 0.0.0.255 192.168.15.0 0.0.0.255
+
+
+! Crypto map
+crypto map VPN-MAP 10 ipsec-isakmp
+ set peer 10.10.10.2
+ set transform-set MY-TRANSFORM
+ match address 100
+exit
+
+! Application sur interface reliant R2
+interface s1/0
+ crypto map VPN-MAP
+
+! Routage statique vers 192.168.15.0/24 (réseau de R2)
+ip route 192.168.15.0 255.255.255.0 10.10.10.2
+
+! Rappel : le reste du réseau utilise RIP (ne pas supprimer)
+router rip
+ version 2
+ network 192.168.0.0
+ network 11.11.11.0

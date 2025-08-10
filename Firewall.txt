@@ -1,0 +1,154 @@
+#!/bin/bash
+
+# Met à jour les paquets
+echo "[+] Mise à jour du système..."
+apt update && apt upgrade -y
+
+# Installe les paquets nécessaires
+echo "[+] Installation de nftables, nano, frr..."
+apt install -y nftables nano frr
+
+# Configuration nftables : règles interzones et NAT
+echo "[+] Configuration complète de nftables (pare-feu + NAT)..."
+
+cat <<EOF > /etc/nftables.conf
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table ip filter {
+    chain input {
+        type filter hook input priority 0;
+        policy drop;
+
+        ct state established,related accept
+        iif lo accept
+
+        # SSH et ICMP en local
+        ip protocol icmp accept
+        tcp dport 22 accept
+
+        # RADIUS
+        udp dport {1812,1813} accept
+
+        # DNS pour DMZ
+        iifname "eth0" udp dport 53 accept
+        iifname "eth0" tcp dport 53 accept
+
+        # HTTP/HTTPS pour DMZ
+        iifname "eth0" tcp dport {80,443} accept
+
+        # Proxy (squid)
+        tcp dport 3128 accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0;
+        policy drop;
+
+        ct state established,related accept
+
+        # LAN ↔ DMZ
+        ip saddr 192.168.10.0/24 ip daddr 192.168.100.0/24 accept
+        ip saddr 192.168.100.0/24 ip daddr 192.168.10.0/24 accept
+
+	# Client 12.12.12.0/24 → DMZ (HTTP/HTTPS)
+        ip saddr 12.12.12.0/24 ip daddr 192.168.100.0/24 tcp dport {80,443} accept
+
+        # VPN → LAN
+        ip saddr 10.10.10.0/24 ip daddr 192.168.10.0/24 accept
+
+        # LAN → Internet
+        ip saddr 192.168.10.0/24 oifname "eth0" accept
+
+        # ToIP ↔ LAN
+        ip saddr 192.168.30.0/24 ip daddr 192.168.10.0/24 accept
+        ip saddr 192.168.10.0/24 ip daddr 192.168.30.0/24 accept
+
+        # ToIP → Auth
+        ip saddr 192.168.30.0/24 ip daddr 192.168.200.0/24 udp dport 1812 accept
+
+        # WiFi → Internet
+        ip saddr 192.168.20.0/24 oifname "eth0" accept
+
+        # WiFi → Auth (RADIUS)
+        ip saddr 192.168.20.0/24 ip daddr 192.168.200.0/24 udp dport 1812 accept
+	
+	
+
+        # Invités → Proxy
+        ip saddr 192.168.50.0/24 ip daddr 192.168.100.0/24 tcp dport 3128 accept
+
+        # Auth ↔ LAN/WiFi/ToIP
+        ip saddr 192.168.10.0/24 ip daddr 192.168.200.0/24 accept
+        ip saddr 192.168.20.0/24 ip daddr 192.168.200.0/24 accept
+        ip saddr 192.168.30.0/24 ip daddr 192.168.200.0/24 accept
+
+        ip saddr 192.168.200.0/24 ip daddr 192.168.10.0/24 accept
+        ip saddr 192.168.200.0/24 ip daddr 192.168.20.0/24 accept
+        ip saddr 192.168.200.0/24 ip daddr 192.168.30.0/24 accept
+    }
+
+    chain output {
+        type filter hook output priority 0;
+        policy accept;
+    }
+}
+
+table ip nat {
+    chain postrouting {
+        type nat hook postrouting priority 100;
+        oifname "eth0" masquerade
+    }
+}
+EOF
+
+# Démarre nftables
+echo "[+] Démarrage de nftables avec la nouvelle configuration..."
+nft -f /etc/nftables.conf
+
+# Vérifie que les règles sont bien appliquées
+echo "[+] Règles nftables actuellement en place :"
+nft list ruleset
+
+# Active l'IP forwarding
+echo "[+] Activation de l'IP forwarding..."
+sysctl -w net.ipv4.ip_forward=1
+grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+
+# --- Configuration de FRR ---
+echo "[+] Configuration de FRR..."
+
+# Active le démon RIP uniquement
+cat <<EOF > /etc/frr/daemons
+bgpd=no
+ospfd=no
+ospf6d=no
+ripd=yes
+ripngd=no
+EOF
+
+# Crée la configuration RIP
+cat <<EOF > /etc/frr/frr.conf
+frr defaults traditional
+hostname FIREWALL
+log file /var/log/frr/frr.log
+
+router rip
+ version 2
+ network 192.168.10.0/24
+ network 192.168.20.0/24
+ network 192.168.30.0/24
+ network 192.168.50.0/24
+ network 192.168.100.0/24
+ network 192.168.200.0/24
+ network 11.11.11.0/24
+EOF
+
+# Redémarre manuellement les daemons FRR
+echo "[+] Redémarrage manuel de FRR..."
+/usr/lib/frr/frrinit.sh stop
+sleep 2
+/usr/lib/frr/frrinit.sh start
+
+echo "[✔] Configuration terminée : nftables, IP forwarding et FRR (RIP) sont opérationnels."

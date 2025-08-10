@@ -1,0 +1,54 @@
+#!/bin/bash
+set -e
+
+# Adresse IP du DNS maître
+DNS_MAITRE="192.168.200.30"
+
+# Liste des zones à configurer en slave, correspondant aux zones master
+ZONES=(
+  "smarttech.local"
+  "tp.local"
+  "local"
+  "200.168.192.in-addr.arpa"
+)
+
+# Répertoires
+BIND_CONF_DIR="/etc/bind"
+ZONE_CACHE_DIR="/var/cache/bind"
+
+echo "📦 Mise à jour et installation de bind9 + dnsutils..."
+apt update
+apt install -y bind9 bind9utils bind9-doc dnsutils
+
+echo "🧼 Sauvegarde de la configuration existante (named.conf.local)..."
+if [ -f "$BIND_CONF_DIR/named.conf.local" ]; then
+  cp "$BIND_CONF_DIR/named.conf.local" "$BIND_CONF_DIR/named.conf.local.bak.$(date +%s)"
+fi
+
+echo "📝 Création de named.conf.local avec les zones esclave (slave)..."
+cat > "$BIND_CONF_DIR/named.conf.local" <<EOF
+// Configuration des zones DNS secondaires (slaves)
+EOF
+
+for zone in "${ZONES[@]}"; do
+  cat >> "$BIND_CONF_DIR/named.conf.local" <<EOF
+zone "$zone" {
+    type slave;
+    masters { $DNS_MAITRE; };
+    file "$ZONE_CACHE_DIR/db.$zone";
+};
+
+EOF
+done
+
+echo "🔍 Vérification de la configuration BIND..."
+named-checkconf
+
+echo "🔄 Redémarrage du service DNS 'named'..."
+if command -v service >/dev/null 2>&1; then
+  service named restart || /etc/init.d/named restart
+else
+  /etc/init.d/named restart
+fi
+
+echo "✅ Configuration DNS secondaire terminée."

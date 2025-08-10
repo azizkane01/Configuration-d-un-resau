@@ -1,0 +1,179 @@
+#!/bin/bash
+set -e
+
+# -----------------------------
+# VARIABLES À ADAPTER
+# -----------------------------
+LDAP_HOSTNAME="ldap.tp.local"                          # Nom ou IP résoluble du serveur LDAP
+LDAP_IP="192.168.200.50"                               # Pour /etc/hosts si pas de DNS
+LDAP_BIND_DN="uid=freeradius_admin,ou=freeradius_users,dc=tp,dc=local"
+LDAP_BIND_PW="Passer123"                               # Mot de passe du bind DN
+BASE_DN="dc=tp,dc=local"                               # Suffixe LDAP
+CERT_FILE="/etc/freeradius/3.0/certs/ldap-ca.pem"      # Chemin pour stocker le certificat LDAP/CA extrait
+LDAP_CONF="/etc/freeradius/3.0/mods-available/ldap"
+CLIENTS_CONF="/etc/freeradius/3.0/clients.conf"
+SITE_DEFAULT="/etc/freeradius/3.0/sites-enabled/default"
+SITE_INNERTUNNEL="/etc/freeradius/3.0/sites-enabled/inner-tunnel"
+
+echo "[*] Vérification des privilèges root..."
+if [[ $EUID -ne 0 ]]; then
+    echo "❌ Ce script doit être exécuté en tant que root."
+    exit 1
+fi
+
+# -----------------------------
+# 1. Installation des paquets nécessaires
+# -----------------------------
+echo "[*] Installation de FreeRADIUS et utilitaires LDAP..."
+apt update -y
+apt install -y freeradius freeradius-ldap ldap-utils openssl curl
+
+# -----------------------------
+# 2. Récupération du certificat via STARTTLS
+# -----------------------------
+echo "[*] Récupération du certificat LDAP via STARTTLS sur $LDAP_HOSTNAME:389..."
+mkdir -p "$(dirname "$CERT_FILE")"
+if echo | openssl s_client -connect "${LDAP_HOSTNAME}:389" -starttls ldap -showcerts 2>/dev/null | \
+     awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' > "$CERT_FILE"; then
+    if [[ -s "$CERT_FILE" ]]; then
+        chmod 644 "$CERT_FILE"
+        echo "✅ Certificat extrait dans $CERT_FILE"
+        echo "   Empreinte SHA256 :"
+        openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256
+    else
+        echo "❌ Aucun certificat récupéré (fichier vide). Vérifiez la prise en charge STARTTLS sur le serveur."
+        exit 1
+    fi
+else
+    echo "❌ Échec de récupération du certificat via STARTTLS. Vérifiez la connectivité et la configuration du serveur LDAP."
+    exit 1
+fi
+
+# -----------------------------
+# 3. Mise à jour de /etc/hosts : 192.168.200.50 --> ldap.tp.local
+# -----------------------------
+echo "[*] Vérification de /etc/hosts pour $LDAP_HOSTNAME..."
+HOSTS_PATTERN="^[[:space:]]*${LDAP_IP}[[:space:]]+${LDAP_HOSTNAME}([[:space:]]|\$)"
+if ! grep -qE "$HOSTS_PATTERN" /etc/hosts; then
+    echo "${LDAP_IP}    ${LDAP_HOSTNAME}" >> /etc/hosts
+    echo "✅ Entrée ajoutée dans /etc/hosts : ${LDAP_IP}    ${LDAP_HOSTNAME}"
+else
+    echo "ℹ️ L’entrée ${LDAP_HOSTNAME} existe déjà dans /etc/hosts"
+fi
+
+# -----------------------------
+# 4. Configuration du module LDAP (mods-available/ldap)
+# -----------------------------
+echo "[*] Écriture de la configuration LDAP dans $LDAP_CONF..."
+cat > "$LDAP_CONF" <<EOF
+ldap {
+    server = "$LDAP_HOSTNAME"
+    port = 389
+    identity = "$LDAP_BIND_DN"
+    password = "$LDAP_BIND_PW"
+    base_dn = "$BASE_DN"
+
+    user {
+        base_dn = "$BASE_DN"
+        filter = "(uid=%{%{Stripped-User-Name}:-%{User-Name}})"
+        scope = "sub"
+        access_positive = yes
+    }
+
+    authenticate {
+        auth_type = bind
+    }
+
+    tls {
+        start_tls = yes
+        ca_file = "$CERT_FILE"
+        require_cert = "demand"
+    }
+
+    timeout = 5
+    timelimit = 3
+    net_timeout = 3
+}
+EOF
+echo "✅ Module LDAP écrit dans $LDAP_CONF (STARTTLS, require_cert=\"demand\")."
+
+# -----------------------------
+# 6. Activation du module LDAP
+# -----------------------------
+echo "[*] Activation du module LDAP..."
+ln -sf ../mods-available/ldap /etc/freeradius/3.0/mods-enabled/ldap
+echo "✅ Lien symbolique créé pour ldap"
+
+# -----------------------------
+# 7. Mise à jour des sites-enabled
+# -----------------------------
+echo "[*] Mise à jour de sites-enabled pour inclure LDAP..."
+
+insert_unlang_blocks() {
+    local site_file="$1"
+    if [[ ! -f "$site_file" ]]; then
+        echo "ℹ️ Fichier $site_file non trouvé, on skip."
+        return
+    fi
+    echo "[*] Traitement de $site_file..."
+
+    # Insérer le module ldap dans authorize s'il n'existe pas
+    if ! grep -q "^[[:space:]]*ldap" "$site_file"; then
+        sed -i "/^authorize[[:space:]]*{/a\    ldap" "$site_file"
+        echo "  - 'ldap' ajouté dans authorize{}"
+    else
+        echo "  - 'ldap' déjà présent dans authorize{}"
+    fi
+
+    if ! grep -q "if (!control.Auth-Type)" "$site_file"; then
+        sed -i "/^authorize[[:space:]]*{/a\\
+    if (!control:Auth-Type) {\\
+        update control {\\
+            Auth-Type := LDAP\\
+        }\\
+    }" "$site_file"
+        echo "  - Bloc inconditionnel Auth-Type := LDAP ajouté dans authorize{}"
+    else
+        echo "  - Bloc inconditionnel Auth-Type déjà présent dans authorize{}"
+    fi
+
+    # Insérer le bloc Auth-Type LDAP dans authenticate si absent
+    if ! grep -q "Auth-Type LDAP" "$site_file"; then
+        sed -i "/^authenticate[[:space:]]*{/a\\
+    Auth-Type LDAP {\\
+        ldap\\
+    }" "$site_file"
+        echo "  - Bloc Auth-Type LDAP ajouté dans authenticate{}"
+    else
+        echo "  - Bloc Auth-Type LDAP déjà présent dans authenticate{}"
+    fi
+}
+
+insert_unlang_blocks "$SITE_DEFAULT"
+insert_unlang_blocks "$SITE_INNERTUNNEL"
+
+# -----------------------------
+# 8. Redémarrage et activation du service
+# -----------------------------
+echo "[*] Redémarrage du service FreeRADIUS..."
+if systemctl restart freeradius; then
+    echo "✅ FreeRADIUS redémarré"
+    systemctl enable freeradius
+else
+    echo "❌ Échec du redémarrage. Lancez 'freeradius -X' pour debug."
+    exit 1
+fi
+
+# -----------------------------
+# 9. Instructions de test
+# -----------------------------
+echo -e "\n🎉 Script terminé. FreeRADIUS configuré pour LDAP+STARTTLS."
+echo "➡️ Tester en mode debug : freeradius -X"
+echo "➡️ Tester le bind LDAP avec STARTTLS :"
+echo "     ldapwhoami -H ldap://$LDAP_HOSTNAME -ZZ -D \"$LDAP_BIND_DN\" -w \"$LDAP_BIND_PW\""
+echo "➡️ Tester la recherche d’un utilisateur :"
+echo "     ldapsearch -H ldap://$LDAP_HOSTNAME -ZZ -x -D \"$LDAP_BIND_DN\" -w \"$LDAP_BIND_PW\" -b \"$BASE_DN\" \"(uid=testuser)\""
+echo "➡️ Tester via RADIUS :"
+echo "     radtest <utilisateur> <mot_de_passe> localhost 0 secretpartage"
+
+# Fin du script

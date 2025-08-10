@@ -1,0 +1,90 @@
+#!/bin/bash
+
+set -e
+
+REALM="TP.LOCAL"
+DOMAIN="tp.local"
+KDC_HOSTNAME="kdc.$DOMAIN"
+LDAP_HOSTNAME="ldap.$DOMAIN"
+LDAP_BASE="dc=tp,dc=local"
+ADMIN_PASS="Passer123"
+LOCAL_IP="192.168.200.50"  
+
+echo "[0/10] Configuration du hostname..."
+hostnamectl set-hostname "$KDC_HOSTNAME"
+
+echo "[0/10] Mise à jour du fichier /etc/hosts..."
+# Sauvegarde du fichier hosts
+cp /etc/hosts /etc/hosts.bak
+
+# Supprimer les éventuelles lignes avec kdc.tp.local ou ldap.tp.local
+sed -i '/kdc\.tp\.local/d' /etc/hosts
+sed -i '/ldap\.tp\.local/d' /etc/hosts
+
+# Ajouter les lignes avec les noms d'hôte
+echo -e "$LOCAL_IP\t$KDC_HOSTNAME $DOMAIN" >> /etc/hosts
+echo -e "$LOCAL_IP\t$LDAP_HOSTNAME" >> /etc/hosts
+
+echo "[1/10] Mise à jour du système..."
+apt update && apt upgrade -y
+
+echo "[2/10] Installation de Kerberos KDC & Admin..."
+DEBIAN_FRONTEND=noninteractive apt install -y krb5-kdc krb5-admin-server
+
+echo "[3/10] Configuration du fichier /etc/krb5.conf..."
+cat > /etc/krb5.conf <<EOF
+[libdefaults]
+    default_realm = $REALM
+
+[realms]
+    $REALM = {
+        kdc = $KDC_HOSTNAME
+        admin_server = $KDC_HOSTNAME
+    }
+
+[domain_realm]
+    .$DOMAIN = $REALM
+    $DOMAIN = $REALM
+EOF
+
+echo "[4/10] Initialisation de la base Kerberos..."
+krb5_newrealm
+
+echo "[5/10] Création de l'utilisateur Kerberos admin/admin avec mot de passe..."
+echo "addprinc -pw $ADMIN_PASS admin/admin" | kadmin.local
+
+echo "[6/10] Installation d'OpenLDAP en mode interactif..."
+# Supprimer les anciennes configurations si besoin
+apt purge -y slapd ldap-utils || true
+rm -rf /etc/ldap /var/lib/ldap /etc/slapd.d
+
+# Lancer l'installation interactivement
+apt install -y slapd ldap-utils
+
+echo "[7/10] Installation des modules SASL et configuration..."
+apt install -y sasl2-bin libsasl2-modules-gssapi-mit
+
+echo "[8/10] Configuration SASL pour OpenLDAP..."
+mkdir -p /etc/ldap/sasl2
+cat > /etc/ldap/sasl2/slapd.conf <<EOF
+pwcheck_method: saslauthd
+mech_list: GSSAPI
+EOF
+
+echo "[9/10] Configuration de saslauthd pour Kerberos..."
+sed -i 's/^START=.*/START=yes/' /etc/default/saslauthd
+sed -i 's/^MECHANISMS=.*/MECHANISMS="kerberos5"/' /etc/default/saslauthd
+systemctl restart saslauthd
+
+echo "[10/10] Configuration de ldap.conf pour SASL GSSAPI..."
+cat > /etc/ldap/ldap.conf <<EOF
+BASE    $LDAP_BASE
+URI     ldap://$LDAP_HOSTNAME
+SASL_MECH GSSAPI
+EOF
+
+echo "✅ Installation terminée."
+echo "➡️ Le mot de passe admin Kerberos est : $ADMIN_PASS"
+echo "➡️ Exécutez maintenant :"
+echo "  kinit admin/admin@$REALM"
+echo "  ldapwhoami -Y GSSAPI"
