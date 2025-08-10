@@ -1,5 +1,9 @@
 # Projet de Fin de Module – Administration et Sécurité d’un Réseau Local
 
+## Notre Architecture 
+![Schéma réseau](Architecture.jpg)
+
+
 ## 📌 Objectif général
 Ce projet consiste à déployer une **infrastructure réseau sécurisée** pour l’entreprise fictive **SMARTTECH**, intégrant plusieurs zones logiques et services critiques.  
 L’accent est mis sur la **sécurité**, l’**authentification centralisée** et la **supervision**.
