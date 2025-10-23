@@ -65,7 +65,7 @@ L’environnement a été mis en place à l’aide de ***GNS3*** sous Ubuntu, ex
 - **Schéma réseau** : zones, adresses IP, VLANs, flux filtrés
 - **Configurations** : nftables, RADIUS, VPN, LDAP, Kerberos, SIP
 - **Captures/tests** : connexions VPN, authentifications RADIUS, appels SIP, logs auditd
-- **Scripts** : installation et test automatisés
+- **Scripts** : installation et test automatisés disponible en allant dans la branche ***scripts***
 - **Présentation** : synthèse du projet
-
+ 
 ---
