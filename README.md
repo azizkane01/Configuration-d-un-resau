@@ -6,7 +6,7 @@
 
 ## 📌 Objectif général
 Ce projet consiste à déployer une **infrastructure réseau sécurisée** pour l’entreprise fictive **SMARTTECH**, intégrant plusieurs zones logiques et services critiques.  
-L’accent est mis sur la **sécurité**, l’**authentification centralisée** et la **supervision**.
+L’accent est mis sur la **sécurité**, l’**authentification centralisée** et la **supervision** des services et du réseau.  
 L’environnement a été mis en place à l’aide de ***GNS3*** sous Ubuntu, exécuté dans ***VMware***, et complété par des ***conteneurs Docker*** pour le déploiement des différents services.
 
 ---
