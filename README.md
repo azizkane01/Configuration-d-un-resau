@@ -7,6 +7,7 @@
 ## 📌 Objectif général
 Ce projet consiste à déployer une **infrastructure réseau sécurisée** pour l’entreprise fictive **SMARTTECH**, intégrant plusieurs zones logiques et services critiques.  
 L’accent est mis sur la **sécurité**, l’**authentification centralisée** et la **supervision**.
+L’environnement a été mis en place à l’aide de ***GNS3*** sous Ubuntu, exécuté dans ***VMware***, et complété par des ***conteneurs Docker*** pour le déploiement des différents services.
 
 ---
 
@@ -68,7 +69,3 @@ L’accent est mis sur la **sécurité**, l’**authentification centralisée** 
 - **Présentation** : synthèse du projet
 
 ---
-
-## 📬 Contact
-Projet réalisé dans le cadre du module **Administration et Sécurité d’un Réseau Local** – **L3 DSTI** (2024-2025)  
-**Université Amadou Mahtar Mbow – Polytech Diamniadio**
